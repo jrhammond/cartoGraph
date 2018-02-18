@@ -1,0 +1,187 @@
+Process of data gathering
+
+***** GENERAL NOTES *****
+
+- Keep a unified CRS
+	- Needs to be projected in meters, not long/lat
+	- Most data comes in WGS84 long/lat format
+	- Decision: Lambert azimuthal equal-area projection
+		- Equal-area projection used for hemispheric data
+		- Not as 'good' as individual UTMs but fuck it
+		- Distance and area measured in meters, not long/lat
+
+- Assume ROADS are the 'definitive geography'
+	- Lines mean less uncertainty (as opposed to area converted to single point for towns)
+	- Relatively high visibility/certainty in remote sensing data - reliable geolocation
+	- Relatively more `complete' data (compared to towns)
+
+
+
+***** PROCESSING ROADS DATA *****
+
+For all OSM country-road data sets (see notes for exceptions!):
+
+OS / SHELL:
+	1. Download country .pbf files including ALL layers from gisgraphy
+		Exceptions 1: subsetting countries
+		- Russia: manually extract roads in Chechnya, Ingushetia, South Ossetia, Dagestan, Kabardino-Balkaria
+		Exceptions 2: bad OSM data
+		In some cases, OSM roads have major issues:
+			- Burundi has enormous gaps of zero coverage
+			- Sudan, South Sudan, Chad, Tajikistan have very low coverage overall
+			- Replace with extractions from gROADS data set
+			- For these countries, move directly to next stage
+	2. Convert to .05m format via osmconvert script
+	3. Extract roads to .osm file using osmfilter script
+
+
+QGIS: clean, convert .osm to .shp and drop extraneous data
+	1. Subset roads file: drop all roads with 'residential' tag
+	2. Drop all descriptive data EXCEPT 'highway' and 'id' columns
+	3. Save as new .shp file
+		Exceptions 1: The script runs fine on Windows and Mac, but throws a "length expected >= 0" error on Ubuntu
+
+
+R: Subset data by GADM
+	1. Load cleaned roads line data
+	3. Access GADM-1 admin districts associated with conflict
+	4. Reproject admin shapefile to road proj4 CRS
+	5. Subset roads data by border (intersect/within)
+	6. Save as new .shp files, append conflict ID to name
+		- Ex: ET_1-133_roads
+
+R: subset roads by area for local conflicts
+	1. Load country towns and roads .shp files
+	2. Identify localized conflicts: either coded as Territorial in UCDP or manually identified as such
+	3. Identify GADM1 regions in which localized conflicts occurred
+		- Manually coded, see end of doc for list of localized conflicts)
+	4. Subset towns and roads by conflict regions
+	5. Write out as new .shp files
+	6. Rename all road/town files as [iso2]_[conflict id]_roads
+
+
+GRASS: modify topology and process roads
+	1. Set up location using SAME PROJECTION as roads files (important!)
+	2. For each country, set up a mapspace and import roads file
+	3. Clean roads topology, simplify network structure, create buffer: 
+		1. Break
+		2. Drop duplicates
+		3. Drop 0-length
+		4. Remove dangles 1500 (1)
+		5. Remove dangles 1500 (2)
+		6. Remove dangles 1500 (3)
+		7. Simplify douglas reduction, 5000 threshold, 20 pct features kept
+		8. Break
+		8. Snap 25m
+		9. Break
+		10. Drop duplicates
+		11. Drop 0-length
+		12. Break
+		13. Delete segments <50m
+		14. Break
+		14. Remove duplicates
+		15. Remove 0-length
+		16. Remove dangles 1000
+		16. Buffer 51m
+	4. Export processed lines file to new .shp file
+	5. Export processed buffer polygon to new .shp file
+
+
+***** PROCESSING TOWNS DATA *****
+
+R: access and merge towns data
+	1. Grab .shp files directly through Overpass API via R
+		- Retrieve city, town, village, hamlet records
+		Exceptions 1
+		- Russia: only gather towns in Chechnya, Ingushetia, Ossetia, Dagestan, Kabarda-Balkaria, Tartarstan
+		Exceptions 2
+		- East Timor: Currently coded as occurring in Indonesia. Recode as being IN THAT ACTUAL STATE from UCDP and download towns in the usual way from Overpass API
+		Exceptions 3
+		- Uganda: get data manually from Uganda .o5m file - Overpass throws a "nrow" error
+		Exceptions 4
+		In some cases, OSM city/town/village schema leaves suspiciously low coverate
+			- Afghanistan - I was able to download a third-party settlement shapefile from ESOC (https://esoc.princeton.edu/files/basemap-settlements) that appears more comprehensive
+	2. Merge with capital-city data (fuzzy merge on names to account for different spelling)
+	3. Merge with raster data (economics, terrain, population, ethnicity)
+	4. Calculate additional metrics (distance to border, capital, diamonds) 
+	5. Reproject to Lambert AEA projection (same as roads data)
+	6. Save as same .shp file (overwrite old file)
+
+R: Subset data by GADM
+	1. Load cleaned towns point data
+	3. Access GADM-1 admin districts associated with conflict
+	4. Reproject admin shapefile to road proj4 CRS
+	5. Subset towns data by border (intersect/within)
+	6. Save as new .shp files, append conflict ID to name
+		- Ex: ET_1-133_towns
+
+
+R: merge towns data with spatial covariates
+	1. Snap GED points to place coordinates - going on, GED/place coordinates are place coordinates
+		- 1, 2.5, 5km buffer zones
+	2. Snap place & GED points to point on nearest road
+		- Closest point on line
+		- 1, 2.5, 5km buffer zones
+	3. Thin non-capital towns against one another within some buffer distance
+		- finds all towns within X dist of each other, randomly drops all but 1 in area
+	4. Thin non-capital towns against capital towns within some buffer distance
+		- has to be done in two steps because otherwise capitals might be randomly dropped
+	5. Get areal population estimates where population is not measured for places
+		- Mean population within buffer around place coordinates
+		- 1, 2.5, 5km buffer zones
+
+
+***** CREATING SPATIAL NETWORKS *****
+	- Actually converting roads/towns into spatial networks
+
+R: merge and process data
+	1. Load cleaned towns data
+	2. Separate capital and non-capital cities
+	3. Thin non-capital cities based on proximity to each other (2500m distance)
+	4. Thin non-capital cities based on proximity to capitals (2500m distance)
+		- After thinning, should be zero overlapping place buffers
+	5. Load cleaned roads data
+	6. Snap towns to roads with 2500m tolerance
+	7. Load cleaned roads buffer data
+	8. Aggregate roads buffer to single feature
+	9. Create 1000m buffer around towns (merged; single feature)
+	10. Take difference between roads buffer and town buffer (cookie-cut roads)
+	11. Disaggregate roads buffer based on overlap; one feature per 'chunk' of connected roads
+	12. Create 1001m buffer around towns (separate; one feature per town)
+	13. Calculate intersections between roads buffers and towns buffers
+	14. Create 2-mode network based on road chunk ID, town ID, and intersection data
+	15. Collapse to 1-mode network to calculate towns sharing road ties
+	16. Export as network object
+	
+
+***** TERRITORIAL CONFLICTS AND ADMINISTRATIVE REGIONS *****
+Bangladesh 1-126: Chittagong
+Ethiopia/Ogaden 1-133: Somali
+Ethiopia/Oromiya 1-219: Oromia
+Ethiopia/Eritrea 1-78: Entire state (EPLF marched on the capital)
+India/Manipur 1-152: Manipur
+India/Punjab-Khalistan 1-156: Punjab, Haryana
+India/Kashmir 1-169: Jammu and Kashmir
+India/Assam 1-170: Assam, Meghalaya, Arunachal Pradesh
+India/Nagaland 1-54: Assam, Manipur, Nagaland
+India/PWG-CPI 1-29 (not coded as territorial, but highly local): Jharkhand, Bihar, Chattisgarh, Odisha, Andhra Pradesh
+Indonesia (EAST TIMOR)/East Timor 1-134: East Timor (duh)
+Indonesia/Aceh 1-171: Aceh
+Iran/Kurdistan 1-6: West Azarbaijan, Kordestan, Kermanshah
+Iran/MEK 1-143 (not coded as territorial, but highly local): West Azarbaijan, Kordestan, Kermanshah
+Iraq/Kurdistan 1-74: Arbil, Dihok, As-Sulaymaniyah
+Israel/Southern Lebanon 1-251: Entire state
+Israel/Palestine 1-37: Entire state
+Morocco/Western Sahara 1-135: Entire quasi-state, no Morocco
+Myanmar/Karen 1-23: Kayin, Mon, Tanintharyi, Bago, Yangon, Ayeyarwady
+Myanmar/Kachin 1-34: Kachin, Shan
+Myanmar/Shan 1-67: Shan, Kayah
+Pakistan/Balochistan 1-129: Baluchistan
+Pakistan/TTP 1-209 (not coded as territorial, but highly local): F.A.T.A, N.W.F.P.
+Philippines/Mindanao 1-112: Island of Mindanao: Dinagat Islands, Surigao del Norte, Surigao del Sur, Agusan del Norte, Agusan del Sur, Davao del Norte, Compostela Valley, Davao Oriental, Misamis Oriental, Bukidnon, Davao del Sur, Lanao del Norte, Lanao del Sur, North Cotabato, South Cotabato, Sarangani, Sultan Kudarat, Maguindanao, Zamboanga del Norte, Zamboanga del Sur, Zamboanga Sibugay, Misamis Occidental
+Philippines/CPP 1-10 (not coded as territorial, but everywhere BUT Mindanao): all non-Mindanao provinces
+Russia/Chechnya 1-206: Chechnya, Dagestan, Ingush, Kabardin-Balkar, North Ossetia, Karachay-Cherkess
+Russia/Caucasus 1-257: Chechnya, Dagestan, Ingush, Kabardin-Balkar, North Ossetia, Karachay-Cherkess
+Senegal/Casamance 1-180: Ziguinchor, Sedhiou, Kolda
+Thailand/Pattani 1-248: Narathiwat, Pattani, Yala, Songkhla
+Yemen/South Yemen 1-207: Adan, Abyan, Al Dali, Al Marah, Hadramawt, Lahij, Shabwah
